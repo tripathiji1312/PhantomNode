@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import asyncio
@@ -58,13 +59,20 @@ async def transmit_file(background_tasks: BackgroundTasks, file: UploadFile = Fi
             asyncio.run(broadcast({"type": "status", "message": "Generating acoustic waveform..."}))
             audio_work.generateAudio(binary_content, filename="api_out")
             
-            asyncio.run(broadcast({"type": "status", "message": "Broadcast complete."}))
+            asyncio.run(broadcast({"type": "audio_ready", "message": "Broadcast complete.", "audio_url": "/audio/api_out.wav"}))
         except Exception as e:
             logging.error(f"Error transmitting: {e}")
             asyncio.run(broadcast({"type": "status", "message": f"Error during TX: {str(e)}"}))
             
     background_tasks.add_task(generate_and_play)
     return {"message": "Transmission started"}
+
+@app.get("/audio/{filename}")
+async def serve_audio(filename: str):
+    filepath = os.path.join("audio", filename)
+    if not os.path.exists(filepath):
+        return {"error": "File not found"}
+    return FileResponse(filepath, media_type="audio/wav", filename=filename)
 
 import threading
 
