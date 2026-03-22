@@ -1,33 +1,62 @@
 import os
 import logging
 import numpy as np
-import sounddevice as sd
 import scipy.io.wavfile as wavfile
-import conversion
-import hamming
-import threading
-import time
 
 SAMPLE_RATE = 44100
-BAUD_RATE = 20
 BIT_DURATION = 0.05
 FREQ_0 = 18000
 FREQ_1 = 19500
-# FREQ_0 = 14000
-# FREQ_1 = 16000
 
-# How many FFT bins on either side of the target bin to sum (band energy)
+# Band-energy: sum magnitudes around target bin for robust detection
 BAND_WIDTH = 3
+
+# The known preamble from conversion.py — used for timing alignment
+PREAMBLE = "001110010011100100110111001100110111001101110100011000010111001001110100"
 
 logging.basicConfig(level=logging.INFO)
 
+
 def _band_energy(mag, center_bin, width=BAND_WIDTH):
-    """Sum magnitudes in a band around the center bin for robust detection."""
+    """Sum magnitudes in a band around the center bin."""
     lo = max(0, center_bin - width)
     hi = min(len(mag), center_bin + width + 1)
     return np.sum(mag[lo:hi])
 
+
+def _decode_bits(audio, samples_per_bit, offset=0):
+    """Decode audio starting at sample 'offset' into a binary string using FSK."""
+    pad_factor = 4
+    padded_len = samples_per_bit * pad_factor
+
+    output = ""
+    for i in range(offset, len(audio) - samples_per_bit + 1, samples_per_bit):
+        chunk = audio[i:i + samples_per_bit]
+        windowed = chunk * np.hanning(len(chunk))
+        fft_result = np.fft.fft(windowed, n=padded_len)
+        mag = np.abs(fft_result)
+
+        bin_0 = int(FREQ_0 * (padded_len / SAMPLE_RATE))
+        bin_1 = int(FREQ_1 * (padded_len / SAMPLE_RATE))
+
+        energy_0 = _band_energy(mag, bin_0)
+        energy_1 = _band_energy(mag, bin_1)
+
+        output += '0' if energy_0 > energy_1 else '1'
+
+    return output
+
+
+def _preamble_score(bits, preamble=PREAMBLE):
+    """How well do the first N bits match the known preamble?"""
+    if len(bits) < len(preamble):
+        return 0.0
+    matches = sum(1 for a, b in zip(bits, preamble) if a == b)
+    return matches / len(preamble)
+
+
 def generateAudio(binary_content, filename="audio"):
+    """Encode binary string to FSK audio WAV file. Returns the file path."""
     t = np.arange(0, BIT_DURATION, 1 / SAMPLE_RATE)
     logging.info("Generating audio")
     arr_0 = np.sin(2 * np.pi * FREQ_0 * t)
@@ -35,102 +64,87 @@ def generateAudio(binary_content, filename="audio"):
     window = np.hanning(len(t))
     arr_0 = arr_0 * window
     arr_1 = arr_1 * window
-    audio = []
 
-    for i in range(len(binary_content)):
-        if binary_content[i] == '0':
-            audio.append(arr_0)
-        else:
-            audio.append(arr_1)
-    audio = np.array(audio)
+    audio = []
+    for bit in binary_content:
+        audio.append(arr_0 if bit == '0' else arr_1)
+
     audio = np.concatenate(audio)
     audio = audio * 0.5
-    logging.info("Saving audio in npy")
-    np.save(f'audio/{filename}.npy', audio)
-    logging.info("Playing / Saving audio")
-    wavfile.write(f'audio/{filename}.wav', SAMPLE_RATE, audio)
-    logging.info("Audio file saved as audio/%s.wav", filename)
-    sd.play(audio, SAMPLE_RATE)
-    sd.wait()
-    logging.info("Audio playback finished")
+
+    os.makedirs('audio', exist_ok=True)
+    wav_path = f'audio/{filename}.wav'
+    wavfile.write(wav_path, SAMPLE_RATE, audio.astype(np.float32))
+    logging.info("Audio file saved as %s", wav_path)
+    return wav_path
 
 
-def readAudio(filename, external_stop_event=None):
+def readAudioFromFile(wav_path):
+    """
+    Decode a WAV file back into a binary string.
+    Uses an alignment sweep to find the optimal bit boundary offset.
+    """
+    sample_rate, audio = wavfile.read(wav_path)
+    logging.info("Reading audio from %s (sample_rate=%d, samples=%d)",
+                 wav_path, sample_rate, len(audio))
+
+    # Convert to mono float
+    if audio.ndim > 1:
+        audio = audio[:, 0]
+    if audio.dtype == np.int16:
+        audio = audio.astype(np.float32) / 32768.0
+    elif audio.dtype == np.int32:
+        audio = audio.astype(np.float32) / 2147483648.0
+
+    # Resample if needed
+    if sample_rate != SAMPLE_RATE:
+        logging.warning("Sample rate mismatch: got %d, expected %d. Resampling.",
+                        sample_rate, SAMPLE_RATE)
+        from scipy.signal import resample
+        num_samples = int(len(audio) * SAMPLE_RATE / sample_rate)
+        audio = resample(audio, num_samples)
+
     samples_per_bit = int(SAMPLE_RATE * BIT_DURATION)
-    recording = []
 
-    def callback(indata, frames, time_info, status):
-        recording.append(indata.copy())
+    # Step 1: Find approximate signal start
+    audio = _hunter(audio, samples_per_bit)
 
-    stop_flag = threading.Event()
-    if external_stop_event is not None:
-        stop_flag = external_stop_event
-    else:
-        def wait_for_stop():
-            input("Press ENTER to stop recording...\n")
-            stop_flag.set()
+    logging.info("Decoding %d samples (%d potential bits)",
+                 len(audio), len(audio) // samples_per_bit)
 
-        print("Recording...")
-        threading.Thread(target=wait_for_stop, daemon=True).start()
+    # Step 2: Alignment sweep — try different sub-bit offsets
+    # and pick the one that best matches the known preamble
+    best_offset = 0
+    best_score = 0.0
+    best_bits = ""
+    step = max(1, samples_per_bit // 20)  # ~5% of a bit duration per step
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=callback):
-        while not stop_flag.is_set():
-            time.sleep(0.1)
+    for offset in range(0, samples_per_bit, step):
+        bits = _decode_bits(audio, samples_per_bit, offset)
+        score = _preamble_score(bits)
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+            best_bits = bits
 
-    audio = np.concatenate(recording, axis=0)
-    print("Recording stopped.")
-    audio = audio.flatten()
+    logging.info("Timing lock: offset=%d samples, preamble match=%.2f%% at preview index=%d",
+                 best_offset, best_score * 100,
+                 best_bits.find(PREAMBLE[:10]) if PREAMBLE[:10] in best_bits else -1)
 
-    # --- Improved signal hunting with fine-grained alignment ---
-    audio = hunter(audio, samples_per_bit)
+    if best_score < 0.50:
+        logging.warning("Very low preamble confidence (%.1f%%). Signal may be too noisy.",
+                        best_score * 100)
 
-    logging.info("Reading audio")
-    output = ""
-
-    # Zero-pad each chunk for better FFT frequency resolution (4x oversampling)
-    pad_factor = 4
-    padded_len = samples_per_bit * pad_factor
-
-    for i in range(0, len(audio), samples_per_bit):
-        current_chunk = audio[i:i + samples_per_bit]
-        if len(current_chunk) < samples_per_bit:
-            break
-
-        # Apply Hanning window before FFT to reduce spectral leakage
-        windowed = current_chunk * np.hanning(len(current_chunk))
-
-        # Zero-padded FFT for better frequency resolution
-        fft_result = np.fft.fft(windowed, n=padded_len)
-        mag = np.abs(fft_result)
-
-        # Calculate bins using the padded length
-        bin_0 = int(FREQ_0 * (padded_len / SAMPLE_RATE))
-        bin_1 = int(FREQ_1 * (padded_len / SAMPLE_RATE))
-
-        # Sum energy in a band around each target frequency
-        energy_0 = _band_energy(mag, bin_0)
-        energy_1 = _band_energy(mag, bin_1)
-
-        if energy_0 > energy_1:
-            output += '0'
-        else:
-            output += '1'
-
-    return output
+    return best_bits
 
 
-def hunter(audio, samples_per_bit):
-    """
-    Detect where the actual signal begins in the recording.
-    Uses a conservative approach: finds when energy rises above noise,
-    then backs up a small safety margin so the preamble isn't clipped.
-    """
+def _hunter(audio, samples_per_bit):
+    """Detect where the FSK signal begins in a recording."""
     window_size = min(2000, len(audio) // 2)
-
     if len(audio) < window_size:
         return audio
 
-    # Measure baseline noise from the very start of the recording
+    # Baseline noise from the start
     first_chunk = audio[0:window_size]
     fft_result = np.fft.fft(first_chunk)
     mag = np.abs(fft_result)
@@ -138,39 +152,22 @@ def hunter(audio, samples_per_bit):
     bin_1 = int(FREQ_1 * (len(first_chunk) / SAMPLE_RATE))
 
     baseline_energy = max(_band_energy(mag, bin_0), _band_energy(mag, bin_1))
-    threshold = baseline_energy * 3  # Lower threshold for earlier detection
+    threshold = baseline_energy * 3
 
-    # Scan forward in small steps to find when signal first appears
+    # Scan for signal onset
     signal_start = 0
-    step = 50
-    for i in range(0, len(audio) - window_size, step):
-        current_window = audio[i:i + window_size]
-        fft_result = np.fft.fft(current_window)
-        mag = np.abs(fft_result)
-        bin_0_w = int(FREQ_0 * (len(current_window) / SAMPLE_RATE))
-        bin_1_w = int(FREQ_1 * (len(current_window) / SAMPLE_RATE))
-
-        e0 = _band_energy(mag, bin_0_w)
-        e1 = _band_energy(mag, bin_1_w)
-
-        if e0 > threshold or e1 > threshold:
+    for i in range(0, len(audio) - window_size, 50):
+        w = audio[i:i + window_size]
+        fft_r = np.fft.fft(w)
+        m = np.abs(fft_r)
+        b0 = int(FREQ_0 * (len(w) / SAMPLE_RATE))
+        b1 = int(FREQ_1 * (len(w) / SAMPLE_RATE))
+        if _band_energy(m, b0) > threshold or _band_energy(m, b1) > threshold:
             signal_start = i
             break
 
-    # Back up by a safety margin (half a bit duration) so we don't clip the preamble
-    safety_margin = samples_per_bit // 2
-    final_start = max(0, signal_start - safety_margin)
-
-    logging.info(f"Signal detected at sample {signal_start}, trimming from {final_start} (safety margin: {safety_margin})")
-    return audio[final_start:]
-
-
-if __name__ == '__main__':
-    logging.info("Starting audio read")
-    output = readAudio("audio")
-    logging.info("Converting audio to binary")
-    with open(f'tests_output/binary_content.txt', 'w') as f:
-        f.write(output)
-    logging.info("Converting binary to string")
-    conversion.toString(f'tests_output/binary_content.txt')
-    logging.info("Conversion complete")
+    # Back up by one full bit so we don't clip any preamble
+    safety = samples_per_bit
+    final = max(0, signal_start - safety)
+    logging.info("Signal at sample %d, trimming from %d", signal_start, final)
+    return audio[final:]
