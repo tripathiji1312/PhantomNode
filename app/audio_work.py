@@ -4,12 +4,17 @@ import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wavfile
 import conversion
+import hamming
+import threading
+import time
+import keyboard
 
 SAMPLE_RATE = 44100
-BAUD_RATE = 10
-BIT_DURATION = 0.1
-FREQ_0 = 400 #18000 LATER
-FREQ_1 = 800 #19500 LATER
+BAUD_RATE = 20
+BIT_DURATION = 0.05
+FREQ_0 = 18000
+FREQ_1 = 19500
+
 logging.basicConfig(level=logging.INFO)
 
 def generateAudio(binary_content, filename = "audio"):
@@ -17,8 +22,12 @@ def generateAudio(binary_content, filename = "audio"):
     logging.info("Generating audio")
     arr_0 = np.sin(2 * np.pi * FREQ_0 * t)
     arr_1 = np.sin(2 * np.pi * FREQ_1 * t)
+    window = np.hanning(len(t))
+    arr_0 = arr_0 * window
+    arr_1 = arr_1 * window
     # audio = np.where(binary_content == '0', arr_0, arr_1)
     audio = []
+
     for i in range(len(binary_content)):
         if binary_content[i] == '0':
             audio.append(arr_0)
@@ -27,19 +36,36 @@ def generateAudio(binary_content, filename = "audio"):
     audio = np.array(audio)
     audio = np.concatenate(audio)
     # audio = audio.concatenate(audio)
+    audio = audio * 0.5
     logging.info("Saving audio in npy")
     np.save(f'audio/{filename}.npy', audio)
     # print(audio)
     logging.info("Playing/ Saving audio")
+    # sd.play(audio, SAMPLE_RATE)
     wavfile.write(f'audio/{filename}.wav', SAMPLE_RATE, audio)
     logging.info("Audio file saved as audio/%s.wav", filename)
 
 def readAudio(filename):
     # SAMPLE_RATE, audio = wavfile.read(f'audio/{filename}.wav')
-    logging.info("Listening audio...")
     samples_per_bit = int(SAMPLE_RATE * BIT_DURATION)
-    audio = sd.rec(int(SAMPLE_RATE*24), samplerate=SAMPLE_RATE, channels=1)
-    sd.wait()
+    recording = []
+    stop_flag = threading.Event()
+    def callback(indata, frames, time_info, status):
+        recording.append(indata.copy())
+
+    def wait_for_stop():
+        input("Press ENTER to stop recording...\n")
+        stop_flag.set()
+
+    print("Recording...")
+    threading.Thread(target=wait_for_stop, daemon=True).start()
+
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=callback):
+        while not stop_flag.is_set():
+            time.sleep(0.1)
+
+    audio = np.concatenate(recording, axis=0)
+    print("Recording stopped.")
     audio = audio.flatten()
     audio = hunter(audio)
     logging.info("Reading audio")

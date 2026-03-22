@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.10"
 dependencies = [
+    "keyboard>=0.13.5",
     "numpy>=2.2.6",
     "scipy>=1.15.3",
     "scipy-stubs~=1.15.3",
