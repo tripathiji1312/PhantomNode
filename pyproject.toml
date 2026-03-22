@@ -4,9 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.135.1",
     "keyboard>=0.13.5",
     "numpy>=2.2.6",
+    "python-multipart>=0.0.22",
     "scipy>=1.15.3",
     "scipy-stubs~=1.15.3",
     "sounddevice>=0.5.5",
+    "uvicorn>=0.42.0",
+    "websockets>=16.0",
 ]

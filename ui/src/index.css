@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@theme {
+  --color-funky-pink: #FF90E8;
+  --color-funky-orange: #FFC900;
+  --color-funky-lime: #C4FF00;
+  --color-funky-cyan: #90E0EF;
+  --color-funky-purple: #B28DFF;
+  
+  --color-surface: #F2F2F2;
+  --color-surface-dim: #E0E0E0;
+  --color-surface-container: #FFFFFF;
+  --color-on-surface: #000000;
+  --color-on-surface-variant: #333333;
+
+  --color-primary: #FF90E8;
+  --color-on-primary: #000000;
+  --color-primary-container: #FFD9E2;
+  --color-on-primary-container: #000000;
+  
+  --font-sans: 'Manrope', system-ui, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-on-surface font-sans antialiased overflow-x-hidden;
+    background-image: radial-gradient(var(--color-surface-dim) 2px, transparent 2px);
+    background-size: 32px 32px;
+    background-position: 0 0;
+  }
+
+  /* Funky Scrollbar */
+  ::-webkit-scrollbar {
+    width: 16px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface border-l-4 border-on-surface;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-funky-orange border-4 border-on-surface;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-funky-pink;
+  }
+}
+
+@layer utilities {
+  .shadow-neo {
+    box-shadow: 12px 12px 0px 0px rgba(0, 0, 0, 1);
+  }
+  .shadow-neo-sm {
+    box-shadow: 6px 6px 0px 0px rgba(0, 0, 0, 1);
+  }
+  .shadow-neo-hover {
+    box-shadow: 16px 16px 0px 0px rgba(0, 0, 0, 1);
+  }
+  .shadow-neo-inset {
+    box-shadow: inset 6px 6px 0px 0px rgba(0, 0, 0, 0.1);
+  }
+}

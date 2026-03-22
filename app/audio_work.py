@@ -45,20 +45,24 @@ def generateAudio(binary_content, filename = "audio"):
     wavfile.write(f'audio/{filename}.wav', SAMPLE_RATE, audio)
     logging.info("Audio file saved as audio/%s.wav", filename)
 
-def readAudio(filename):
+def readAudio(filename, external_stop_event=None):
     # SAMPLE_RATE, audio = wavfile.read(f'audio/{filename}.wav')
     samples_per_bit = int(SAMPLE_RATE * BIT_DURATION)
     recording = []
-    stop_flag = threading.Event()
+    
     def callback(indata, frames, time_info, status):
         recording.append(indata.copy())
+        
+    stop_flag = threading.Event()
+    if external_stop_event is not None:
+        stop_flag = external_stop_event
+    else:
+        def wait_for_stop():
+            input("Press ENTER to stop recording...\n")
+            stop_flag.set()
 
-    def wait_for_stop():
-        input("Press ENTER to stop recording...\n")
-        stop_flag.set()
-
-    print("Recording...")
-    threading.Thread(target=wait_for_stop, daemon=True).start()
+        print("Recording...")
+        threading.Thread(target=wait_for_stop, daemon=True).start()
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=callback):
         while not stop_flag.is_set():
