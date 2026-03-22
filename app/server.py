@@ -27,9 +27,11 @@ app.add_middleware(
 )
 
 
+@app.get("/")
 @app.get("/health")
+@app.get("//health") # Handle trailing slash edgecases from frontend env vars
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "app": "PhantomNode API"}
 
 
 @app.post("/tx")

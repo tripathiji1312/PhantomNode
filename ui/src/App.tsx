@@ -30,7 +30,8 @@ type Toast = {
 /* ——————————————————————————————————————————————————
    Constants
 —————————————————————————————————————————————————— */
-const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const RAW_API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const API_BASE = RAW_API_BASE.replace(/\/$/, '')
 const MAX_EVENTS = 50
 
 /* ——————————————————————————————————————————————————
